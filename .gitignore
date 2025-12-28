@@ -141,3 +141,7 @@ data/processed/
 models/
 *.egg-info/
 
+# CI/CD reports (но разрешаем коммитить daily reports)
+reports/*.tmp
+reports/.gitkeep
+
