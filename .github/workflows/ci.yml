@@ -1,0 +1,231 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  # Scheduled workflow - запуск каждый день в 00:00 UTC
+  schedule:
+    - cron: '0 0 * * *'
+  # Workflow dispatch - ручной запуск с параметрами
+  workflow_dispatch:
+    inputs:
+      test_language:
+        description: 'Language to test (en, ru, de, all)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - en
+          - ru
+          - de
+      python_version:
+        description: 'Python version to test'
+        required: true
+        default: '3.10'
+        type: choice
+        options:
+          - '3.8'
+          - '3.9'
+          - '3.10'
+          - '3.11'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run tests with pytest
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term --cov-report=html
+    
+    - name: Generate test report
+      run: |
+        echo "# Test Report - $(date)" > test_report.md
+        echo "" >> test_report.md
+        echo "## Python Version: ${{ matrix.python-version }}" >> test_report.md
+        echo "" >> test_report.md
+        echo "### Test Results" >> test_report.md
+        pytest tests/ -v --tb=short >> test_report.md 2>&1 || true
+        echo "" >> test_report.md
+        echo "### Coverage Summary" >> test_report.md
+        coverage report >> test_report.md || true
+    
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-python-${{ matrix.python-version }}
+        path: |
+          test_report.md
+          coverage.xml
+          htmlcov/
+        retention-days: 30
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  test-multilingual:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: ['en', 'ru', 'de']
+      # Используем параметры из workflow_dispatch если они есть
+      fail-fast: false
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ github.event.inputs.python_version || '3.10' }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Check if language should be tested
+      id: check_language
+      run: |
+        if [ "${{ github.event.inputs.test_language }}" != "" ] && [ "${{ github.event.inputs.test_language }}" != "all" ] && [ "${{ github.event.inputs.test_language }}" != "${{ matrix.language }}" ]; then
+          echo "skip=true" >> $GITHUB_OUTPUT
+        else
+          echo "skip=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Test with language ${{ matrix.language }}
+      if: steps.check_language.outputs.skip != 'true'
+      run: |
+        python -m pytest tests/test_summarizer.py::TestSummarizer::test_summarize_${{ matrix.language }} -v
+    
+    - name: Upload language test results
+      if: steps.check_language.outputs.skip != 'true'
+      uses: actions/upload-artifact@v3
+      with:
+        name: language-test-${{ matrix.language }}
+        path: |
+          .pytest_cache/
+        if-no-files-found: ignore
+        retention-days: 7
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install linting dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black mypy
+    
+    - name: Run flake8
+      run: |
+        flake8 src/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Check code formatting with black
+      run: |
+        black --check src/ tests/
+    
+    - name: Run mypy
+      run: |
+        mypy src/ --ignore-missing-imports || true
+    
+    - name: Upload linting results
+      uses: actions/upload-artifact@v3
+      with:
+        name: linting-results
+        path: |
+          .mypy_cache/
+        if-no-files-found: ignore
+        retention-days: 7
+
+  # Креативный job: Генерация ежедневного отчета
+  daily-report:
+    runs-on: ubuntu-latest
+    # Запускается только по расписанию или через workflow_dispatch
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Generate daily summary report
+      run: |
+        mkdir -p reports
+        echo "# Daily Summary Report" > reports/daily_report_$(date +%Y%m%d).md
+        echo "Generated: $(date)" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "## Project Status" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "### Test Summary" >> reports/daily_report_$(date +%Y%m%d).md
+        pytest tests/ -v --tb=no -q 2>&1 | head -20 >> reports/daily_report_$(date +%Y%m%d).md || true
+        echo "" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "### Code Statistics" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "Python files: $(find src -name '*.py' | wc -l)" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "Test files: $(find tests -name '*.py' | wc -l)" >> reports/daily_report_$(date +%Y%m%d).md
+        echo "Total lines of code: $(find src -name '*.py' -exec wc -l {} + | tail -1 | awk '{print $1}')" >> reports/daily_report_$(date +%Y%m%d).md
+    
+    - name: Upload daily report
+      uses: actions/upload-artifact@v3
+      with:
+        name: daily-report-$(date +%Y%m%d)
+        path: reports/
+        retention-days: 90
+    
+    - name: Commit and push report (if scheduled)
+      if: github.event_name == 'schedule'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add reports/ || true
+        git commit -m "Add daily report $(date +%Y%m%d)" || exit 0
+        git push || exit 0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
